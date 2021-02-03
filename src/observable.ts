@@ -1,4 +1,4 @@
-import { ApolloError } from "@apollo/client/core";
+import { ApolloError, NetworkStatus } from "@apollo/client/core";
 import type { FetchResult, Observable, ObservableQuery } from "@apollo/client";
 import { readable } from "svelte/store";
 import { Readable } from "svelte/store";
@@ -10,16 +10,19 @@ export interface Loading {
 	loading: true;
 	data?: undefined;
 	error?: undefined;
+	networkStatus?: number;
 }
 export interface Error {
 	loading: false;
 	data?: undefined;
 	error: ApolloError | Error;
+	networkStatus?: number;
 }
 export interface Data<TData = unknown> {
 	loading: false;
 	data: TData | null | undefined;
 	error?: undefined;
+	networkStatus?: number;
 }
 
 export type Result<TData = unknown> = Loading | Error | Data<TData>;
@@ -72,7 +75,9 @@ export interface ObservableQueryExtensions<TData = unknown> {
 	getCurrentResult: ObservableQuery<TData>["getCurrentResult"];
 	getLastError: ObservableQuery<TData>["getLastError"];
 	getLastResult: ObservableQuery<TData>["getLastResult"];
-	isDifferentFromLastResult: ObservableQuery<TData>["isDifferentFromLastResult"];
+	isDifferentFromLastResult: ObservableQuery<
+		TData
+	>["isDifferentFromLastResult"];
 	refetch: ObservableQuery<TData>["refetch"];
 	resetLastResults: ObservableQuery<TData>["resetLastResults"];
 	resetQueryStoreErrors: ObservableQuery<TData>["resetQueryStoreErrors"];
@@ -111,11 +116,51 @@ export function observableQueryToReadable<
 	TVariables = unknown
 >(
 	query: ObservableQuery<TData, TVariables>,
-	initialValue?: Result<TData>
+	initialValue: Result<TData> = {
+		loading: true,
+		data: undefined,
+		error: undefined,
+	}
 ): ReadableQuery<TData> {
-	const store = observableToReadable(query, initialValue) as ReadableQuery<
-		TData
-	>;
+	const store = readable<Result<TData>>(initialValue, (set) => {
+		const skipDuplicate = initialValue?.data !== undefined;
+		let skipped = false;
+
+		const subscription = query.subscribe(
+			(result) => {
+				if (skipDuplicate && !skipped) {
+					skipped = true;
+					return;
+				}
+
+				if (result.errors) {
+					const error = new ApolloError({ graphQLErrors: result.errors });
+					set({
+						loading: false,
+						data: undefined,
+						error,
+						networkStatus: result.networkStatus,
+					});
+				} else {
+					set({
+						loading: false,
+						data: result.data,
+						error: undefined,
+						networkStatus: result.networkStatus,
+					});
+				}
+			},
+			(error) =>
+				set({
+					loading: false,
+					data: undefined,
+					error,
+					networkStatus: NetworkStatus.error,
+				})
+		);
+
+		return () => subscription.unsubscribe();
+	}) as ReadableQuery<TData>;
 
 	for (const extension of extensions) {
 		store[extension] = query[extension].bind(query) as any;
